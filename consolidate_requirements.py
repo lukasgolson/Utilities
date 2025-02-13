@@ -1,109 +1,223 @@
+#!/usr/bin/env python3
 import os
 import logging
+from typing import Dict, List, Optional, Tuple
 
 try:
-    import chardet
+    import chardet  # Install via: pip install chardet
 except ImportError:
-    raise ImportError("Please install the 'chardet' library using 'pip install chardet'")
+    raise ImportError("Please install 'chardet' using 'pip install chardet'")
 
 try:
-    from packaging.requirements import Requirement
+    from packaging.requirements import Requirement  # Install via: pip install packaging
 except ImportError:
-    raise ImportError("Please install the 'packaging' library using 'pip install packaging'")
+    raise ImportError("Please install 'packaging' using 'pip install packaging'")
 
-# Set up logging
+from packaging.version import Version, InvalidVersion
+
+# Configure logging with increased verbosity.
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s: %(message)s'))
 logger.addHandler(handler)
 
-def read_file_with_detected_encoding(file_path):
+
+def detect_encoding(file_path: str) -> str:
     """
-    Reads a file by first detecting its encoding using chardet.
-    Returns the file's content as a string.
+    Detects the encoding of a file using chardet.
     """
     with open(file_path, 'rb') as f:
         raw_data = f.read()
-
     detection = chardet.detect(raw_data)
-    encoding = detection.get('encoding')
+    encoding = detection.get('encoding') or 'utf-8'
     confidence = detection.get('confidence')
+    logger.debug(f"File '{file_path}' raw encoding detection: {detection}")
     logger.info(f"Detected encoding for {file_path}: {encoding} (Confidence: {confidence})")
+    return encoding
 
-    if encoding is None:
-        encoding = 'utf-8'
 
+def read_file(file_path: str) -> Optional[str]:
+    """
+    Reads a file using its detected encoding.
+    """
     try:
-        return raw_data.decode(encoding)
+        encoding = detect_encoding(file_path)
+        with open(file_path, 'r', encoding=encoding, errors='replace') as f:
+            content = f.read()
+        logger.debug(f"Read {len(content)} characters from file {file_path}")
+        return content
     except Exception as e:
-        logger.error(f"Error decoding {file_path} with encoding {encoding}: {e}")
+        logger.error(f"Error reading {file_path}: {e}")
         return None
 
-def consolidate_requirements(root_dir):
+
+def parse_requirements(content: str, file_path: str) -> List[str]:
     """
-    Walks through the directory tree from root_dir, finds all 'requirements.txt' files (except in the root),
-    detects their encoding, reads their contents, and writes everything to a single output file in the root.
-    Also checks for multiple versions of the same package and raises a warning if found.
+    Extracts valid requirement lines from file content.
+    """
+    reqs = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            Requirement(line)
+            reqs.append(line)
+        except Exception as e:
+            logger.warning(f"Could not parse line '{line}' in {file_path}: {e}")
+    logger.debug(f"Parsed {len(reqs)} valid requirement lines from {file_path}")
+    return reqs
+
+
+def extract_version(req: Requirement) -> Optional[Version]:
+    """
+    Extracts the version from a Requirement if it has a pinned version specifier.
+    Checks for both '==' and '~=' operators.
+
+    Returns:
+        A Version object if found, otherwise None.
+    """
+    for spec in req.specifier:
+        if spec.operator in ("==", "~="):
+            try:
+                version_obj = Version(spec.version)
+                logger.debug(f"Extracted version {version_obj} from requirement {req}")
+                return version_obj
+            except InvalidVersion:
+                logger.warning(f"Invalid version format for package {req.name}: {spec.version}")
+                return None
+    logger.debug(f"No valid version specifier found in requirement {req}")
+    return None
+
+
+def consolidate_package_requirements(
+        package: str, entries: List[Tuple[str, Optional[Version]]]
+) -> List[str]:
+    """
+    Consolidates multiple requirement entries for a single package.
+
+    - If entries have different major versions, all entries are included and a warning is logged.
+    - If entries differ only in minor/patch versions (i.e. same major version), only the highest version is kept.
+    - Entries without version info are kept as is.
+
+    Returns:
+        A list of consolidated requirement lines for the package.
+    """
+    # Group entries by major version; use None for entries with no version info.
+    groups: Dict[Optional[int], List[Tuple[str, Optional[Version]]]] = {}
+    for line, version in entries:
+        group_key = version.major if version is not None else None
+        groups.setdefault(group_key, []).append((line, version))
+    logger.debug(f"Package '{package}' version groups: {[(k, [e[0] for e in v]) for k, v in groups.items()]}")
+
+    consolidated_lines: List[str] = []
+    if len(groups) > 1:
+        # Multiple major versions are present.
+        for group_key, group_entries in groups.items():
+            if group_key is not None:
+                best_entry = max(group_entries, key=lambda x: x[1])
+                consolidated_lines.append(best_entry[0])
+                logger.debug(
+                    f"For package '{package}', major version {group_key}: selected best entry '{best_entry[0]}'")
+            else:
+                unique = set(line for line, _ in group_entries)
+                consolidated_lines.extend(unique)
+                logger.debug(f"For package '{package}', no version info: added entries {unique}")
+        logger.warning(
+            f"Different major versions found for package '{package}': {list(groups.keys())}. "
+            f"Including all entries: {consolidated_lines}"
+        )
+    else:
+        # Only one major version (or no version info) exists.
+        group_entries = next(iter(groups.values()))
+        if len(group_entries) > 1:
+            logger.warning(f"Multiple versions for '{package}': {[(line, version) for line, version in group_entries]}")
+
+        if next(iter(groups)) is not None:
+            best_entry = max(group_entries, key=lambda x: x[1])
+            consolidated_lines.append(best_entry[0])
+            logger.debug(f"For package '{package}', single major version group: selected best entry '{best_entry[0]}'")
+        else:
+            unique = set(line for line, _ in group_entries)
+            consolidated_lines.extend(unique)
+            logger.debug(f"For package '{package}', no version info: added entries {unique}")
+
+    # Remove duplicates while preserving order.
+    return list(dict.fromkeys(consolidated_lines))
+
+
+def consolidate_requirements(root_dir: str) -> None:
+    """
+    Consolidates all non-root requirements.txt files from the directory tree.
+
+    Parses each requirement, groups them by package, and consolidates version
+    specifications based on the following rules:
+      - If different major versions exist for the same package, output all versions.
+      - If only minor/patch differences exist, output only the highest version.
+
+    The final consolidated, sorted list of requirements is written to a single
+    requirements.txt in the root directory.
     """
     output_file = os.path.join(root_dir, 'requirements.txt')
-    package_versions = {}  # Dictionary to store package names and a set of their version specifiers.
-    consolidated_contents = []  # List to store contents from each file.
+    requirements_by_package: Dict[str, List[Tuple[str, Optional[Version]]]] = {}
+    file_count = 0
+    total_req_count = 0
 
-    # Walk through the directory tree starting from root_dir.
-    for subdir, dirs, files in os.walk(root_dir):
+    for subdir, _, files in os.walk(root_dir):
+        # Skip the root directory to avoid processing the consolidated file.
+        if os.path.abspath(subdir) == os.path.abspath(root_dir):
+            continue
         for file in files:
             if file == 'requirements.txt':
-                # Skip the root requirements file.
-                if os.path.abspath(subdir) == os.path.abspath(root_dir):
-                    continue
-
                 file_path = os.path.join(subdir, file)
-                content = read_file_with_detected_encoding(file_path)
+                logger.info(f"Processing file: {file_path}")
+                content = read_file(file_path)
                 if content is None:
-                    logger.error(f"# Error: Could not decode file {file_path}.\n")
+                    logger.error(f"Could not decode file {file_path}.")
                     continue
-
-                # Process each line to detect package version conflicts.
-                for line in content.splitlines():
-                    stripped_line = line.strip()
-                    # Skip comments and empty lines.
-                    if not stripped_line or stripped_line.startswith("#"):
-                        continue
+                file_count += 1
+                req_lines = parse_requirements(content, file_path)
+                total_req_count += len(req_lines)
+                for line in req_lines:
                     try:
-                        # Parse the requirement using packaging.
-                        req = Requirement(stripped_line)
-                        pkg_name = req.name.lower()
-                        # Convert the specifier to string; it will be empty if no version is specified.
-                        version_spec = str(req.specifier)
-                        if pkg_name not in package_versions:
-                            package_versions[pkg_name] = set()
-                        package_versions[pkg_name].add(version_spec)
+                        req = Requirement(line)
                     except Exception as e:
-                        logger.warning(f"Could not parse line '{line}' in {file_path}: {e}")
+                        logger.warning(f"Could not parse requirement line '{line}' in {file_path}: {e}")
+                        continue
+                    pkg_name = req.name.lower()
+                    version = extract_version(req)
+                    requirements_by_package.setdefault(pkg_name, []).append((line, version))
+                    logger.debug(f"Added requirement for package '{pkg_name}': '{line}' with version {version}")
 
-                # Append the content to the consolidated list.
-                consolidated_contents.append(f"# Contents of {file_path}\n{content}\n")
+    logger.info(f"Processed {file_count} files with a total of {total_req_count} requirement lines.")
+
+    consolidated_lines: List[str] = []
+    for pkg in sorted(requirements_by_package.keys()):
+        pkg_lines = consolidate_package_requirements(pkg, requirements_by_package[pkg])
+        consolidated_lines.extend(pkg_lines)
+        logger.debug(f"Consolidated requirement for package '{pkg}': {pkg_lines}")
 
     with open(output_file, 'w', encoding='utf-8') as outfile:
-        for content in consolidated_contents:
-            outfile.write(content)
+        for line in consolidated_lines:
+            outfile.write(line + "\n")
+    logger.info(f"Consolidated requirements written to {output_file}")
+    logger.debug(f"Final consolidated requirements: {consolidated_lines}")
 
-    logger.info(f"All requirements.txt contents have been consolidated into {output_file}")
 
-    # Check for version conflicts with the same package
-    for pkg, versions in package_versions.items():
-        non_empty_versions = {v for v in versions if v}
-        if len(non_empty_versions) > 1:
-            logger.warning(f"Multiple version specifications found for package '{pkg}': {non_empty_versions}")
-        if "" in versions and len(versions) > 1:
-            logger.warning(f"Package '{pkg}' is specified without a version in some files and with a version in others: {versions}")
+def main() -> None:
+    """
+    Main entry point:
+      - Removes any existing consolidated requirements.txt in the root.
+      - Initiates the consolidation process.
+    """
+    root_directory = os.getcwd()
+    output_path = os.path.join(root_directory, 'requirements.txt')
+    if os.path.exists(output_path):
+        os.remove(output_path)
+        logger.debug(f"Removed existing consolidated requirements file at {output_path}")
+    consolidate_requirements(root_directory)
+
 
 if __name__ == "__main__":
-    root_directory = os.getcwd()
-
-    root_req_path = os.path.join(root_directory, 'requirements.txt')
-    if os.path.exists(root_req_path):
-        os.remove(root_req_path)
-
-    consolidate_requirements(root_directory)
+    main()
