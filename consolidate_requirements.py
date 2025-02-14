@@ -3,17 +3,30 @@ import os
 import logging
 from typing import Dict, List, Optional, Tuple
 
+chardet_installed = False
+packaging_installed = False
+
 try:
     import chardet  # Install via: pip install chardet
+
+    chardet_installed = True
 except ImportError:
-    raise ImportError("Please install 'chardet' using 'pip install chardet'")
+    pass
 
 try:
-    from packaging.requirements import Requirement  # Install via: pip install packaging
+    from packaging.requirements import Requirement
+    from packaging.version import Version, InvalidVersion
+    packaging_installed = True
 except ImportError:
-    raise ImportError("Please install 'packaging' using 'pip install packaging'")
+    pass
 
-from packaging.version import Version, InvalidVersion
+if not chardet_installed and not packaging_installed:
+
+    raise ImportError("Please install the required packages: chardet, packaging: pip install chardet packaging")
+elif not chardet_installed:
+    raise ImportError("Please install the required package: chardet: pip install chardet")
+elif not packaging_installed:
+    raise ImportError("Please install the required package: packaging: pip install packaging")
 
 # Configure logging with increased verbosity.
 logger = logging.getLogger(__name__)
