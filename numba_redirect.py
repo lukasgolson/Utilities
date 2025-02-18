@@ -1,3 +1,6 @@
+# workaround for KeyError: 'LLVMPY_AddSymbol' error on certain Windows 11 installations, particularly virtualized Windows environments.
+
+
 import logging
 
 logger = logging.getLogger(__name__)
