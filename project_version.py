@@ -103,7 +103,6 @@ class ProjectVersion:
                 else hashlib.md5(usedforsecurity=False)
             )
             # Using functools.partial to avoid recreating the lambda every iteration.
-            reader = partial(file_path.open("rb").read, 8192)
             with file_path.open("rb") as f:
                 for chunk in iter(partial(f.read, 8192), b""):
                     hasher.update(chunk)
