@@ -1,51 +1,78 @@
-# workaround for KeyError: 'LLVMPY_AddSymbol' error on certain Windows 11 installations, particularly virtualized Windows environments.
-
-
+import sys
 import logging
+import types
 
 logger = logging.getLogger(__name__)
 
-def is_numba_available() -> (bool, str):
-    """
-    Check if numba is available and working.
 
+def is_numba_available() -> (bool, Exception):
+    """
+    Check if numba is available.
     Returns:
-        tuple: A boolean indicating numba availability and an Exception (if any).
+        A tuple (available: bool, exception: Exception or None).
     """
     try:
-        import numba
+        import numba  # Attempt to import the real numba package.
         return True, None
     except Exception as e:
+        return False, e
 
-        # get exception type
 
-        e_type = type(e).__name__
-
-        return False, e_type
-
-def _dummy_decorator(*args, **kwargs):
-    def decorator(func):
-        return func
-    return decorator
-
-def _dummy_prange(*args, **kwargs):
-    # Use the built-in range for sequential iteration.
-    return range(*args, **kwargs)
-
-# Check for numba availability.
 _available, _exception = is_numba_available()
 
 if _available:
+    # Import the real numba and its submodule.
     import numba
-    # Redirect to numba's implementations.
-    jit = numba.jit
-    njit = numba.njit
-    prange = numba.prange
-    from numba.typed import List as NumbaList
-    List = NumbaList
+    import numba.typed
+
+    # Set sys.modules to the actual numba modules.
+    sys.modules["numba"] = numba
+    sys.modules["numba.typed"] = numba.typed
+
 else:
-    logger.warning("Numba is not available. Falling back to pure python. Exception: %s", _exception)
-    jit = _dummy_decorator
-    njit = _dummy_decorator
-    prange = _dummy_prange
-    List = list
+    # Provide dummy implementations if numba is not available.
+    logger.warning("Numba is not available. Using dummy implementations. Reason: %s", _exception)
+
+    # Create a dummy numba module.
+    dummy_numba = types.ModuleType("numba")
+    dummy_numba.jit = lambda *args, **kwargs: (lambda f: f)
+    dummy_numba.njit = lambda *args, **kwargs: (lambda f: f)
+    dummy_numba.prange = range
+    dummy_numba.__all__ = ['jit', 'njit', 'prange', 'typed']
+
+
+    # Define __getattr__ for the dummy numba module to throw errors for undefined attributes.
+    def numba_getattr(name):
+        raise AttributeError(f"Dummy numba module does not define attribute '{name}'")
+
+
+    dummy_numba.__getattr__ = numba_getattr
+
+    # Create a dummy submodule for numba.typed.
+    dummy_typed = types.ModuleType("numba.typed")
+    dummy_typed.List = list  # Use Python's built-in list as a fallback.
+
+
+    # Define __getattr__ for the dummy numba.typed module.
+    def typed_getattr(name):
+        raise AttributeError(f"Dummy numba.typed module does not define attribute '{name}'")
+
+
+    dummy_typed.__getattr__ = typed_getattr
+
+    # Set attributes for the dummy numba module.
+    dummy_numba.typed = dummy_typed
+
+    # Insert these dummy modules into sys.modules.
+    sys.modules["numba"] = dummy_numba
+    sys.modules["numba.typed"] = dummy_typed
+
+__all__ = ['numba_redirect']
+
+
+def numba_redirect():
+    """
+      This function exists solely to initialize the script.
+      It intentionally does nothing else.
+    """
+    pass
