@@ -16,10 +16,11 @@ This prevents the program from getting stuck if a child process is unresponsive.
 import os
 import signal
 import sys
-import psutil
+
 
 
 def __find_child_processes():
+    import psutil
     """Find child processes of the current process."""
     parent = psutil.Process(os.getpid())
     return parent.children(recursive=True)
@@ -32,6 +33,7 @@ def __force_kill_handler(signal_received, frame):
 
 
 def __terminate_all_children_processes(graceful=True):
+    import psutil
     """Terminate or kill all child processes."""
     child_processes = __find_child_processes()
     for child in child_processes:
